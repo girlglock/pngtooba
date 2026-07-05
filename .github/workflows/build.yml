@@ -1,0 +1,94 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      - name: install llvm
+        run: choco install -y llvm
+
+      - name: Set LIBCLANG_PATH
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+
+      - name: get obs.dll
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo obsproject/obs-studio --pattern "*Windows-x64.zip" -O obs.zip
+          Expand-Archive obs.zip -DestinationPath obs
+
+          dumpbin /EXPORTS obs\bin\64bit\obs.dll | Out-File -Encoding utf8 dumpbin_out.txt
+          $pattern = '^\s*\d+\s+[0-9a-f]+\s+[0-9a-f]+\s+(\S+)(?:\s+=\s+\S+)?\s*$'
+          $exports = Get-Content dumpbin_out.txt | Select-String -Pattern $pattern | ForEach-Object { $_.Matches[0].Groups[1].Value }
+          "EXPORTS" | Set-Content -Encoding ascii obs.def
+          $exports | Add-Content -Encoding ascii obs.def
+          lib "/DEF:obs.def" "/OUT:obs.lib" "/MACHINE:X64"
+
+          echo "LIBOBS_PATH=$pwd" >> $env:GITHUB_ENV
+
+      - name: build
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: target/release/pngtooba.dll
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
+      - name: install obs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo obsproject/obs-studio --pattern "*Ubuntu-24.04-x86_64.deb" -O obs.deb
+          sudo apt-get install -y ./obs.deb
+
+      - name: build
+        env:
+          LIBRARY_PATH: /usr/local/lib/x86_64-linux-gnu
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: target/release/libpngtooba.so
+
+  package:
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: bin
+
+      - name: assemble plugin folder
+        run: |
+          out=package/obs-studio/obs-plugins/64bit
+          mkdir -p "$out"
+          cp bin/windows-binary/pngtooba.dll "$out/"
+          cp bin/linux-binary/libpngtooba.so "$out/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pngtooba
+          path: package
