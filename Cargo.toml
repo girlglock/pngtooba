@@ -1,0 +1,17 @@
+[package]
+name = "pngtooba"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "pngtooba"
+crate-type = ["cdylib"]
+
+[dependencies]
+obs-wrapper = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
+rustfft = "6"
+
+[profile.release]
+panic = "abort"
