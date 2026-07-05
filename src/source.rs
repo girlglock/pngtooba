@@ -7,9 +7,8 @@ use obs_wrapper::{
     data::DataObj,
     obs_string,
     obs_sys::{
-        obs_data_release, obs_data_set_string, obs_data_t, obs_properties_add_button,
+        obs_data_get_bool, obs_data_set_bool, obs_data_set_string, obs_data_t, obs_properties_get,
         obs_properties_t, obs_property_set_modified_callback, obs_property_t,
-        obs_source_get_settings, obs_source_t, obs_source_update,
     },
     properties::*,
     source::*,
@@ -17,7 +16,7 @@ use obs_wrapper::{
     wrapper::PtrWrapper,
 };
 use std::borrow::Cow;
-use std::ffi::{c_void, CString};
+use std::ffi::CString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -53,20 +52,18 @@ fn image_path_prop() -> PathProp {
     PathProp::new(PathType::File).with_filter(obs_string!("Image Files (*.png *.gif *.webp)"))
 }
 
-unsafe fn clear_source_field(data: *mut c_void, key: &str) -> bool {
-    let source = data as *mut obs_source_t;
-    if source.is_null() {
-        return false;
+unsafe fn clear_field_if_checked(
+    settings: *mut obs_data_t,
+    path_key: &str,
+    clear_key: &str,
+) -> bool {
+    let path_cname = CString::new(path_key).unwrap();
+    let clear_cname = CString::new(clear_key).unwrap();
+    if obs_data_get_bool(settings, clear_cname.as_ptr()) {
+        let empty = CString::new("").unwrap();
+        obs_data_set_string(settings, path_cname.as_ptr(), empty.as_ptr());
+        obs_data_set_bool(settings, clear_cname.as_ptr(), false);
     }
-    let settings = obs_source_get_settings(source);
-    if settings.is_null() {
-        return false;
-    }
-    let cname = CString::new(key).unwrap();
-    let empty = CString::new("").unwrap();
-    obs_data_set_string(settings, cname.as_ptr(), empty.as_ptr());
-    obs_source_update(source, std::ptr::null_mut());
-    obs_data_release(settings);
     true
 }
 
@@ -75,9 +72,9 @@ macro_rules! clear_callback {
         unsafe extern "C" fn $fn_name(
             _props: *mut obs_properties_t,
             _property: *mut obs_property_t,
-            data: *mut c_void,
+            settings: *mut obs_data_t,
         ) -> bool {
-            clear_source_field(data, $key)
+            clear_field_if_checked(settings, $key, concat!($key, "_clear"))
         }
     };
 }
@@ -92,20 +89,24 @@ clear_callback!(clear_vowel_o_image, "vowel_o_image");
 clear_callback!(clear_vowel_u_image, "vowel_u_image");
 
 type ClearCallback =
-    unsafe extern "C" fn(*mut obs_properties_t, *mut obs_property_t, *mut c_void) -> bool;
+    unsafe extern "C" fn(*mut obs_properties_t, *mut obs_property_t, *mut obs_data_t) -> bool;
 
 fn add_image_field(g: &mut Properties, key: &str, label: ObsString, clear_callback: ClearCallback) {
     g.add(ObsString::from(key), label, image_path_prop());
 
-    let button_name = CString::new(format!("{key}_clear_btn")).unwrap();
-    let button_text = CString::new("Clear").unwrap();
+    let clear_key = format!("{key}_clear");
+    g.add(
+        ObsString::from(clear_key.clone()),
+        obs_string!("Clear"),
+        BoolProp,
+    );
+
+    let clear_cname = CString::new(clear_key).unwrap();
     unsafe {
-        obs_properties_add_button(
-            g.as_ptr_mut(),
-            button_name.as_ptr(),
-            button_text.as_ptr(),
-            Some(clear_callback),
-        );
+        let prop = obs_properties_get(g.as_ptr_mut(), clear_cname.as_ptr());
+        if !prop.is_null() {
+            obs_property_set_modified_callback(prop, Some(clear_callback));
+        }
     }
 }
 
@@ -268,17 +269,24 @@ impl GetDefaultsSource for PngTuberSource {
         settings.set_default::<i64>(obs_string!("width"), 512);
         settings.set_default::<i64>(obs_string!("height"), 512);
         settings.set_default::<Cow<str>>(obs_string!("idle_image"), "");
+        settings.set_default::<bool>(obs_string!("idle_image_clear"), false);
         settings.set_default::<bool>(obs_string!("keep_idle_visible"), false);
         settings.set_default::<Cow<str>>(obs_string!("speaking_image"), "");
+        settings.set_default::<bool>(obs_string!("speaking_image_clear"), false);
         settings.set_default::<Cow<str>>(obs_string!("mic_source"), "");
         settings.set_default::<f64>(obs_string!("mic_sensitivity"), 0.02);
         settings.set_default::<bool>(obs_string!("vowel_enabled"), false);
         settings.set_default::<f64>(obs_string!("vowel_smoothing"), 0.5);
         for vowel in Vowel::ALL {
             settings.set_default::<Cow<str>>(ObsString::from(vowel.settings_key()), "");
+            settings.set_default::<bool>(
+                ObsString::from(format!("{}_clear", vowel.settings_key())),
+                false,
+            );
         }
 
         settings.set_default::<Cow<str>>(obs_string!("overlay_image"), "");
+        settings.set_default::<bool>(obs_string!("overlay_image_clear"), false);
         settings.set_default::<Cow<str>>(obs_string!("when_speaking_effect"), EFFECT_NONE);
         settings.set_default::<f64>(obs_string!("shake_intensity"), 8.0);
         settings.set_default::<f64>(obs_string!("shake_speed"), 10.0);
