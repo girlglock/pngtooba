@@ -6,13 +6,18 @@ use crate::vowel::Vowel;
 use obs_wrapper::{
     data::DataObj,
     obs_string,
-    obs_sys::{obs_data_t, obs_properties_t, obs_property_set_modified_callback, obs_property_t},
+    obs_sys::{
+        obs_data_release, obs_data_set_string, obs_data_t, obs_properties_add_button,
+        obs_properties_t, obs_property_set_modified_callback, obs_property_t,
+        obs_source_get_settings, obs_source_t, obs_source_update,
+    },
     properties::*,
     source::*,
     string::ObsString,
     wrapper::PtrWrapper,
 };
 use std::borrow::Cow;
+use std::ffi::{c_void, CString};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,6 +51,62 @@ fn dimension_prop() -> NumberProp<i64> {
 
 fn image_path_prop() -> PathProp {
     PathProp::new(PathType::File).with_filter(obs_string!("Image Files (*.png *.gif *.webp)"))
+}
+
+unsafe fn clear_source_field(data: *mut c_void, key: &str) -> bool {
+    let source = data as *mut obs_source_t;
+    if source.is_null() {
+        return false;
+    }
+    let settings = obs_source_get_settings(source);
+    if settings.is_null() {
+        return false;
+    }
+    let cname = CString::new(key).unwrap();
+    let empty = CString::new("").unwrap();
+    obs_data_set_string(settings, cname.as_ptr(), empty.as_ptr());
+    obs_source_update(source, std::ptr::null_mut());
+    obs_data_release(settings);
+    true
+}
+
+macro_rules! clear_callback {
+    ($fn_name:ident, $key:literal) => {
+        unsafe extern "C" fn $fn_name(
+            _props: *mut obs_properties_t,
+            _property: *mut obs_property_t,
+            data: *mut c_void,
+        ) -> bool {
+            clear_source_field(data, $key)
+        }
+    };
+}
+
+clear_callback!(clear_idle_image, "idle_image");
+clear_callback!(clear_speaking_image, "speaking_image");
+clear_callback!(clear_overlay_image, "overlay_image");
+clear_callback!(clear_vowel_a_image, "vowel_a_image");
+clear_callback!(clear_vowel_e_image, "vowel_e_image");
+clear_callback!(clear_vowel_i_image, "vowel_i_image");
+clear_callback!(clear_vowel_o_image, "vowel_o_image");
+clear_callback!(clear_vowel_u_image, "vowel_u_image");
+
+type ClearCallback =
+    unsafe extern "C" fn(*mut obs_properties_t, *mut obs_property_t, *mut c_void) -> bool;
+
+fn add_image_field(g: &mut Properties, key: &str, label: ObsString, clear_callback: ClearCallback) {
+    g.add(ObsString::from(key), label, image_path_prop());
+
+    let button_name = CString::new(format!("{key}_clear_btn")).unwrap();
+    let button_text = CString::new("Clear").unwrap();
+    unsafe {
+        obs_properties_add_button(
+            g.as_ptr_mut(),
+            button_name.as_ptr(),
+            button_text.as_ptr(),
+            Some(clear_callback),
+        );
+    }
 }
 
 pub struct PngTuberSource {
@@ -292,20 +353,17 @@ impl GetPropertiesSource for PngTuberSource {
             obs_string!("idle_speaking"),
             obs_string!("Idle / Speaking Images"),
             |g| {
-                g.add(
-                    obs_string!("idle_image"),
-                    obs_string!("Idle Image"),
-                    image_path_prop(),
-                );
+                add_image_field(g, "idle_image", obs_string!("Idle Image"), clear_idle_image);
                 g.add(
                     obs_string!("keep_idle_visible"),
                     obs_string!("Keep Idle Image Visible While Talking"),
                     BoolProp,
                 );
-                g.add(
-                    obs_string!("speaking_image"),
+                add_image_field(
+                    g,
+                    "speaking_image",
                     obs_string!("Speaking Image"),
-                    image_path_prop(),
+                    clear_speaking_image,
                 );
             },
         );
@@ -328,10 +386,18 @@ impl GetPropertiesSource for PngTuberSource {
                         .with_slider(),
                 );
                 for vowel in Vowel::ALL {
-                    g.add(
-                        ObsString::from(vowel.settings_key()),
+                    let clear_callback = match vowel {
+                        Vowel::A => clear_vowel_a_image,
+                        Vowel::E => clear_vowel_e_image,
+                        Vowel::I => clear_vowel_i_image,
+                        Vowel::O => clear_vowel_o_image,
+                        Vowel::U => clear_vowel_u_image,
+                    };
+                    add_image_field(
+                        g,
+                        vowel.settings_key(),
                         ObsString::from(vowel.label()),
-                        image_path_prop(),
+                        clear_callback,
                     );
                 }
             },
@@ -342,10 +408,11 @@ impl GetPropertiesSource for PngTuberSource {
             obs_string!("effects"),
             obs_string!("Effects"),
             |g| {
-                g.add(
-                    obs_string!("overlay_image"),
+                add_image_field(
+                    g,
+                    "overlay_image",
                     obs_string!("Overlay Image (shown on top of everything else)"),
-                    image_path_prop(),
+                    clear_overlay_image,
                 );
 
                 let mut effect_list = g.add_list::<ObsString>(
