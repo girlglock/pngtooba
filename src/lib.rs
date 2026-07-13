@@ -1,6 +1,8 @@
 mod audio;
 mod enumerate;
 mod image_asset;
+#[cfg(feature = "profiling")]
+mod profiling;
 mod properties_ext;
 mod source;
 mod vowel;
@@ -33,6 +35,8 @@ impl Module for PngToobaModule {
             .enable_get_properties()
             .enable_update()
             .enable_video_render()
+            .enable_activate()
+            .enable_deactivate()
             .build();
 
         load_context.register_source(source);

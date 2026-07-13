@@ -93,6 +93,7 @@ unsafe extern "C" fn audio_capture_callback(
 pub struct MicSubscription {
     source: *mut obs_source_t,
     state: *const Mutex<AudioState>,
+    attached: bool,
 }
 
 impl MicSubscription {
@@ -116,18 +117,49 @@ impl MicSubscription {
         Some(Self {
             source,
             state: state_ptr,
+            attached: true,
         })
     }
-}
 
-impl Drop for MicSubscription {
-    fn drop(&mut self) {
+    pub fn pause(&mut self) {
+        if !self.attached {
+            return;
+        }
         unsafe {
             obs_source_remove_audio_capture_callback(
                 self.source,
                 Some(audio_capture_callback),
                 self.state as *mut c_void,
             );
+        }
+        self.attached = false;
+    }
+
+    pub fn resume(&mut self) {
+        if self.attached {
+            return;
+        }
+        unsafe {
+            obs_source_add_audio_capture_callback(
+                self.source,
+                Some(audio_capture_callback),
+                self.state as *mut c_void,
+            );
+        }
+        self.attached = true;
+    }
+}
+
+impl Drop for MicSubscription {
+    fn drop(&mut self) {
+        unsafe {
+            if self.attached {
+                obs_source_remove_audio_capture_callback(
+                    self.source,
+                    Some(audio_capture_callback),
+                    self.state as *mut c_void,
+                );
+            }
             obs_source_release(self.source);
             Arc::from_raw(self.state);
         }

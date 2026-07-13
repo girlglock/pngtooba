@@ -1,6 +1,8 @@
 use crate::audio::{AudioState, MicSubscription};
 use crate::enumerate::list_audio_sources;
 use crate::image_asset::{load_image_asset, ImageAsset};
+#[cfg(feature = "profiling")]
+use crate::profiling::FrameProfiler;
 use crate::properties_ext::{add_group, set_visible, set_visible_raw};
 use crate::vowel::Vowel;
 use obs_wrapper::{
@@ -154,6 +156,10 @@ pub struct PngTuberSource {
     mic_source_name: String,
     mic: Option<MicSubscription>,
     audio_state: Arc<Mutex<AudioState>>,
+    active: bool,
+
+    #[cfg(feature = "profiling")]
+    profiler: FrameProfiler,
 }
 
 impl PngTuberSource {
@@ -196,6 +202,10 @@ impl PngTuberSource {
             mic_source_name: String::new(),
             mic: None,
             audio_state: Arc::new(Mutex::new(AudioState::new())),
+            active: true,
+
+            #[cfg(feature = "profiling")]
+            profiler: FrameProfiler::new(),
         }
     }
 
@@ -282,6 +292,11 @@ impl PngTuberSource {
         let mic_source_name = get_string(settings, "mic_source");
         if mic_source_name != self.mic_source_name {
             self.mic = MicSubscription::new(&mic_source_name, &self.audio_state);
+            if !self.active {
+                if let Some(mic) = self.mic.as_mut() {
+                    mic.pause();
+                }
+            }
             self.mic_source_name = mic_source_name;
         }
     }
@@ -369,6 +384,24 @@ impl GetDefaultsSource for PngTuberSource {
 impl UpdateSource for PngTuberSource {
     fn update(&mut self, settings: &mut DataObj, context: &mut GlobalContext) {
         self.apply_settings(settings, context);
+    }
+}
+
+impl ActivateSource for PngTuberSource {
+    fn activate(&mut self) {
+        self.active = true;
+        if let Some(mic) = self.mic.as_mut() {
+            mic.resume();
+        }
+    }
+}
+
+impl DeactivateSource for PngTuberSource {
+    fn deactivate(&mut self) {
+        self.active = false;
+        if let Some(mic) = self.mic.as_mut() {
+            mic.pause();
+        }
     }
 }
 
@@ -801,7 +834,7 @@ fn compute_effect_offset(effect: &str, t: f32, p: &EffectParams) -> (f32, f32) {
                 4.0 * n - pos
             };
             let phase = pos.fract();
-            let arc = p.hop_height - 4.0 * p.hop_height * (phase - 0.5).powi(2);
+            let arc = 4.0 * p.hop_height * phase * (1.0 - phase);
             (x_hops * w, -arc)
         }
         _ => (0.0, 0.0),
@@ -810,6 +843,11 @@ fn compute_effect_offset(effect: &str, t: f32, p: &EffectParams) -> (f32, f32) {
 
 impl VideoRenderSource for PngTuberSource {
     fn video_render(&mut self, _context: &mut GlobalContext, _render: &mut VideoRenderContext) {
+        #[cfg(feature = "profiling")]
+        let frame_start = Instant::now();
+
+        #[cfg(feature = "profiling")]
+        let audio_start = Instant::now();
         let (talking, vowel, vowel_enabled) = {
             let state = self.audio_state.lock().unwrap();
             (
@@ -818,14 +856,24 @@ impl VideoRenderSource for PngTuberSource {
                 state.vowel_enabled,
             )
         };
+        #[cfg(feature = "profiling")]
+        let audio_elapsed = audio_start.elapsed();
 
         let elapsed = self.animation_start.elapsed();
+
+        #[cfg(feature = "profiling")]
+        let effect_start = Instant::now();
         let (offset_x, offset_y) = self.smoothed_effect_offset(talking, elapsed);
-        let draw_at = |asset: &ImageAsset, x: i32, y: i32| {
-            asset
-                .current_texture(elapsed)
-                .draw(x, y, self.width, self.height, false)
+        #[cfg(feature = "profiling")]
+        let effect_elapsed = effect_start.elapsed();
+
+        let (src_w, src_h) = (self.width, self.height);
+        let draw_at = move |asset: &ImageAsset, x: i32, y: i32| {
+            asset.current_texture(elapsed).draw(x, y, src_w, src_h, false)
         };
+
+        #[cfg(feature = "profiling")]
+        let draw_start = Instant::now();
 
         if self.keep_idle_visible {
             if let Some(idle) = self.idle_asset.as_ref() {
@@ -849,6 +897,16 @@ impl VideoRenderSource for PngTuberSource {
 
         if let Some(overlay) = self.overlay_asset.as_ref() {
             draw_at(overlay, offset_x, offset_y);
+        }
+
+        #[cfg(feature = "profiling")]
+        {
+            let draw_elapsed = draw_start.elapsed();
+            let total_elapsed = frame_start.elapsed();
+            self.profiler
+                .record(audio_elapsed, effect_elapsed, draw_elapsed, total_elapsed);
+            let overlay_tex = self.profiler.overlay();
+            overlay_tex.draw(6, 6, overlay_tex.width(), overlay_tex.height(), false);
         }
     }
 }

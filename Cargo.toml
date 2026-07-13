@@ -8,6 +8,10 @@ license = "MIT"
 name = "pngtooba"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+profiling = []
+
 [dependencies]
 obs-wrapper = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
