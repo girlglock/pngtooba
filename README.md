@@ -10,5 +10,5 @@ An OBS PNGTuber plugin with vowel support and simple effects
 - shake/bounce/hop effects
 
 **Installation:**
-- extract the zip into your obs install (eg `C:\Program Files\obs-studio`)
+- download the latest [release](https://github.com/girlglock/pngtooba/releases) and extract the zip into your obs install (eg `C:\Program Files\obs-studio`)
 - in OBS, add a new source and choose **PNGTooba**
