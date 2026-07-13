@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 const EFFECT_NONE: &str = "none";
 const EFFECT_SHAKE: &str = "shake";
 const EFFECT_BOUNCE: &str = "bounce";
+const EFFECT_HOP: &str = "hop";
 
 fn get_string(settings: &DataObj, key: &str) -> String {
     settings
@@ -133,6 +134,22 @@ pub struct PngTuberSource {
     shake_speed: f32,
     bounce_height: f32,
     bounce_speed: f32,
+    hop_count: f32,
+    hop_speed: f32,
+    hop_height: f32,
+
+    when_idle_effect: String,
+    idle_shake_intensity: f32,
+    idle_shake_speed: f32,
+    idle_bounce_height: f32,
+    idle_bounce_speed: f32,
+    idle_hop_count: f32,
+    idle_hop_speed: f32,
+    idle_hop_height: f32,
+
+    effect_transition_time: f32,
+    blended_offset: (f32, f32),
+    last_elapsed: Duration,
 
     mic_source_name: String,
     mic: Option<MicSubscription>,
@@ -159,6 +176,23 @@ impl PngTuberSource {
             shake_speed: 10.0,
             bounce_height: 25.0,
             bounce_speed: 2.5,
+            hop_count: 2.0,
+            hop_speed: 2.0,
+            hop_height: 20.0,
+
+            when_idle_effect: EFFECT_NONE.to_string(),
+            idle_shake_intensity: 8.0,
+            idle_shake_speed: 10.0,
+            idle_bounce_height: 25.0,
+            idle_bounce_speed: 2.5,
+            idle_hop_count: 2.0,
+            idle_hop_speed: 2.0,
+            idle_hop_height: 20.0,
+
+            effect_transition_time: 0.15,
+            blended_offset: (0.0, 0.0),
+            last_elapsed: Duration::ZERO,
+
             mic_source_name: String::new(),
             mic: None,
             audio_state: Arc::new(Mutex::new(AudioState::new())),
@@ -208,6 +242,29 @@ impl PngTuberSource {
         self.shake_speed = settings.get::<f64>("shake_speed").unwrap_or(10.0) as f32;
         self.bounce_height = settings.get::<f64>("bounce_height").unwrap_or(25.0) as f32;
         self.bounce_speed = settings.get::<f64>("bounce_speed").unwrap_or(2.5) as f32;
+        self.hop_count = settings.get::<i64>("hop_count").unwrap_or(2).max(1) as f32;
+        self.hop_speed = settings.get::<f64>("hop_speed").unwrap_or(2.0) as f32;
+        self.hop_height = settings.get::<f64>("hop_height").unwrap_or(20.0) as f32;
+
+        self.when_idle_effect = get_string(settings, "when_idle_effect");
+        if self.when_idle_effect.is_empty() {
+            self.when_idle_effect = EFFECT_NONE.to_string();
+        }
+        self.idle_shake_intensity = settings
+            .get::<f64>("idle_shake_intensity")
+            .unwrap_or(8.0) as f32;
+        self.idle_shake_speed = settings.get::<f64>("idle_shake_speed").unwrap_or(10.0) as f32;
+        self.idle_bounce_height = settings
+            .get::<f64>("idle_bounce_height")
+            .unwrap_or(25.0) as f32;
+        self.idle_bounce_speed = settings.get::<f64>("idle_bounce_speed").unwrap_or(2.5) as f32;
+        self.idle_hop_count = settings.get::<i64>("idle_hop_count").unwrap_or(2).max(1) as f32;
+        self.idle_hop_speed = settings.get::<f64>("idle_hop_speed").unwrap_or(2.0) as f32;
+        self.idle_hop_height = settings.get::<f64>("idle_hop_height").unwrap_or(20.0) as f32;
+
+        self.effect_transition_time = settings
+            .get::<f64>("effect_transition_time")
+            .unwrap_or(0.15) as f32;
 
         let vowel_enabled = settings.get::<bool>("vowel_enabled").unwrap_or(false);
         let vowel_smoothing = settings.get::<f64>("vowel_smoothing").unwrap_or(0.5) as f32;
@@ -292,6 +349,20 @@ impl GetDefaultsSource for PngTuberSource {
         settings.set_default::<f64>(obs_string!("shake_speed"), 10.0);
         settings.set_default::<f64>(obs_string!("bounce_height"), 25.0);
         settings.set_default::<f64>(obs_string!("bounce_speed"), 2.5);
+        settings.set_default::<i64>(obs_string!("hop_count"), 2);
+        settings.set_default::<f64>(obs_string!("hop_speed"), 2.0);
+        settings.set_default::<f64>(obs_string!("hop_height"), 20.0);
+
+        settings.set_default::<Cow<str>>(obs_string!("when_idle_effect"), EFFECT_NONE);
+        settings.set_default::<f64>(obs_string!("idle_shake_intensity"), 8.0);
+        settings.set_default::<f64>(obs_string!("idle_shake_speed"), 10.0);
+        settings.set_default::<f64>(obs_string!("idle_bounce_height"), 25.0);
+        settings.set_default::<f64>(obs_string!("idle_bounce_speed"), 2.5);
+        settings.set_default::<i64>(obs_string!("idle_hop_count"), 2);
+        settings.set_default::<f64>(obs_string!("idle_hop_speed"), 2.0);
+        settings.set_default::<f64>(obs_string!("idle_hop_height"), 20.0);
+
+        settings.set_default::<f64>(obs_string!("effect_transition_time"), 0.15);
     }
 }
 
@@ -317,6 +388,31 @@ unsafe extern "C" fn effect_modified(
     set_visible_raw(props, "shake_speed", effect == EFFECT_SHAKE);
     set_visible_raw(props, "bounce_height", effect == EFFECT_BOUNCE);
     set_visible_raw(props, "bounce_speed", effect == EFFECT_BOUNCE);
+    set_visible_raw(props, "hop_count", effect == EFFECT_HOP);
+    set_visible_raw(props, "hop_speed", effect == EFFECT_HOP);
+    set_visible_raw(props, "hop_height", effect == EFFECT_HOP);
+    true
+}
+
+unsafe extern "C" fn idle_effect_modified(
+    props: *mut obs_properties_t,
+    _property: *mut obs_property_t,
+    settings: *mut obs_data_t,
+) -> bool {
+    let wrapped = DataObj::from_raw(settings);
+    let effect = wrapped
+        .get::<Cow<str>>("when_idle_effect")
+        .map(|s| s.into_owned())
+        .unwrap_or_default();
+    std::mem::forget(wrapped);
+
+    set_visible_raw(props, "idle_shake_intensity", effect == EFFECT_SHAKE);
+    set_visible_raw(props, "idle_shake_speed", effect == EFFECT_SHAKE);
+    set_visible_raw(props, "idle_bounce_height", effect == EFFECT_BOUNCE);
+    set_visible_raw(props, "idle_bounce_speed", effect == EFFECT_BOUNCE);
+    set_visible_raw(props, "idle_hop_count", effect == EFFECT_HOP);
+    set_visible_raw(props, "idle_hop_speed", effect == EFFECT_HOP);
+    set_visible_raw(props, "idle_hop_height", effect == EFFECT_HOP);
     true
 }
 
@@ -431,6 +527,7 @@ impl GetPropertiesSource for PngTuberSource {
                 effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
                 effect_list.push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
                 effect_list.push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
+                effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
                 unsafe {
                     obs_property_set_modified_callback(
                         effect_list.as_ptr() as *mut _,
@@ -466,6 +563,25 @@ impl GetPropertiesSource for PngTuberSource {
                         .with_range(0.0..=10.0)
                         .with_slider(),
                 );
+                g.add(
+                    obs_string!("hop_count"),
+                    obs_string!("Number of Hops"),
+                    NumberProp::<i64>::new_int().with_range(1..=20),
+                );
+                g.add(
+                    obs_string!("hop_speed"),
+                    obs_string!("Hop Speed"),
+                    NumberProp::<f64>::new_float(0.1)
+                        .with_range(0.1..=10.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("hop_height"),
+                    obs_string!("Hop Height"),
+                    NumberProp::<f64>::new_float(1.0)
+                        .with_range(0.0..=300.0)
+                        .with_slider(),
+                );
 
                 set_visible(
                     g,
@@ -482,6 +598,105 @@ impl GetPropertiesSource for PngTuberSource {
                     g,
                     "bounce_speed",
                     self.when_speaking_effect == EFFECT_BOUNCE,
+                );
+                set_visible(g, "hop_count", self.when_speaking_effect == EFFECT_HOP);
+                set_visible(g, "hop_speed", self.when_speaking_effect == EFFECT_HOP);
+                set_visible(g, "hop_height", self.when_speaking_effect == EFFECT_HOP);
+
+                let mut idle_effect_list = g.add_list::<ObsString>(
+                    obs_string!("when_idle_effect"),
+                    obs_string!("When Idle"),
+                    false,
+                );
+                idle_effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
+                idle_effect_list.push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
+                idle_effect_list.push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
+                idle_effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
+                unsafe {
+                    obs_property_set_modified_callback(
+                        idle_effect_list.as_ptr() as *mut _,
+                        Some(idle_effect_modified),
+                    );
+                }
+
+                g.add(
+                    obs_string!("idle_shake_intensity"),
+                    obs_string!("Idle Shake Intensity"),
+                    NumberProp::<f64>::new_float(1.0)
+                        .with_range(0.0..=100.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("idle_shake_speed"),
+                    obs_string!("Idle Shake Speed"),
+                    NumberProp::<f64>::new_float(0.5)
+                        .with_range(0.0..=30.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("idle_bounce_height"),
+                    obs_string!("Idle Bounce Height"),
+                    NumberProp::<f64>::new_float(1.0)
+                        .with_range(0.0..=300.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("idle_bounce_speed"),
+                    obs_string!("Idle Bounce Speed"),
+                    NumberProp::<f64>::new_float(0.1)
+                        .with_range(0.0..=10.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("idle_hop_count"),
+                    obs_string!("Idle Number of Hops"),
+                    NumberProp::<i64>::new_int().with_range(1..=20),
+                );
+                g.add(
+                    obs_string!("idle_hop_speed"),
+                    obs_string!("Idle Hop Speed"),
+                    NumberProp::<f64>::new_float(0.1)
+                        .with_range(0.1..=10.0)
+                        .with_slider(),
+                );
+                g.add(
+                    obs_string!("idle_hop_height"),
+                    obs_string!("Idle Hop Height"),
+                    NumberProp::<f64>::new_float(1.0)
+                        .with_range(0.0..=300.0)
+                        .with_slider(),
+                );
+
+                set_visible(
+                    g,
+                    "idle_shake_intensity",
+                    self.when_idle_effect == EFFECT_SHAKE,
+                );
+                set_visible(
+                    g,
+                    "idle_shake_speed",
+                    self.when_idle_effect == EFFECT_SHAKE,
+                );
+                set_visible(
+                    g,
+                    "idle_bounce_height",
+                    self.when_idle_effect == EFFECT_BOUNCE,
+                );
+                set_visible(
+                    g,
+                    "idle_bounce_speed",
+                    self.when_idle_effect == EFFECT_BOUNCE,
+                );
+                set_visible(g, "idle_hop_count", self.when_idle_effect == EFFECT_HOP);
+                set_visible(g, "idle_hop_speed", self.when_idle_effect == EFFECT_HOP);
+                set_visible(g, "idle_hop_height", self.when_idle_effect == EFFECT_HOP);
+
+                g.add(
+                    obs_string!("effect_transition_time"),
+                    obs_string!("Transition Smoothing (seconds)"),
+                    NumberProp::<f64>::new_float(0.05)
+                        .with_range(0.0..=2.0)
+                        .with_slider(),
                 );
             },
         );
@@ -501,24 +716,95 @@ impl PngTuberSource {
         }
     }
 
-    fn effect_offset(&self, talking: bool, elapsed: Duration) -> (i32, i32) {
-        if !talking {
-            return (0, 0);
-        }
-
+    fn effect_offset(&self, talking: bool, elapsed: Duration) -> (f32, f32) {
         let t = elapsed.as_secs_f32();
-        match self.when_speaking_effect.as_str() {
-            EFFECT_SHAKE => {
-                let x = (t * self.shake_speed * 13.0).sin() * self.shake_intensity;
-                let y = (t * self.shake_speed * 17.0).cos() * self.shake_intensity;
-                (x as i32, y as i32)
-            }
-            EFFECT_BOUNCE => {
-                let y = -(t * self.bounce_speed).sin().abs() * self.bounce_height;
-                (0, y as i32)
-            }
-            _ => (0, 0),
+        if talking {
+            compute_effect_offset(
+                &self.when_speaking_effect,
+                t,
+                &EffectParams {
+                    shake_intensity: self.shake_intensity,
+                    shake_speed: self.shake_speed,
+                    bounce_height: self.bounce_height,
+                    bounce_speed: self.bounce_speed,
+                    hop_count: self.hop_count,
+                    hop_speed: self.hop_speed,
+                    hop_height: self.hop_height,
+                },
+            )
+        } else {
+            compute_effect_offset(
+                &self.when_idle_effect,
+                t,
+                &EffectParams {
+                    shake_intensity: self.idle_shake_intensity,
+                    shake_speed: self.idle_shake_speed,
+                    bounce_height: self.idle_bounce_height,
+                    bounce_speed: self.idle_bounce_speed,
+                    hop_count: self.idle_hop_count,
+                    hop_speed: self.idle_hop_speed,
+                    hop_height: self.idle_hop_height,
+                },
+            )
         }
+    }
+
+    fn smoothed_effect_offset(&mut self, talking: bool, elapsed: Duration) -> (i32, i32) {
+        let dt = elapsed.saturating_sub(self.last_elapsed).as_secs_f32();
+        self.last_elapsed = elapsed;
+
+        let target = self.effect_offset(talking, elapsed);
+        let tau = self.effect_transition_time.max(0.0001);
+        let alpha = (1.0 - (-dt / tau).exp()).clamp(0.0, 1.0);
+        self.blended_offset.0 += (target.0 - self.blended_offset.0) * alpha;
+        self.blended_offset.1 += (target.1 - self.blended_offset.1) * alpha;
+
+        (
+            self.blended_offset.0.round() as i32,
+            self.blended_offset.1.round() as i32,
+        )
+    }
+}
+
+struct EffectParams {
+    shake_intensity: f32,
+    shake_speed: f32,
+    bounce_height: f32,
+    bounce_speed: f32,
+    hop_count: f32,
+    hop_speed: f32,
+    hop_height: f32,
+}
+
+fn compute_effect_offset(effect: &str, t: f32, p: &EffectParams) -> (f32, f32) {
+    match effect {
+        EFFECT_SHAKE => {
+            let x = (t * p.shake_speed * 13.0).sin() * p.shake_intensity;
+            let y = (t * p.shake_speed * 17.0).cos() * p.shake_intensity;
+            (x, y)
+        }
+        EFFECT_BOUNCE => {
+            let y = -(t * p.bounce_speed).sin().abs() * p.bounce_height;
+            (0.0, y)
+        }
+        EFFECT_HOP => {
+            //y = h - (4h/w^2)(mod(x,w) - w/2)^2
+            let n = p.hop_count.max(1.0);
+            let w = 4.0 * p.hop_height;
+            let period = 4.0 * n;
+            let pos = (t * p.hop_speed).rem_euclid(period);
+            let x_hops = if pos < n {
+                -pos
+            } else if pos < 3.0 * n {
+                pos - 2.0 * n
+            } else {
+                4.0 * n - pos
+            };
+            let phase = pos.fract();
+            let arc = p.hop_height - 4.0 * p.hop_height * (phase - 0.5).powi(2);
+            (x_hops * w, -arc)
+        }
+        _ => (0.0, 0.0),
     }
 }
 
@@ -534,12 +820,12 @@ impl VideoRenderSource for PngTuberSource {
         };
 
         let elapsed = self.animation_start.elapsed();
+        let (offset_x, offset_y) = self.smoothed_effect_offset(talking, elapsed);
         let draw_at = |asset: &ImageAsset, x: i32, y: i32| {
             asset
                 .current_texture(elapsed)
                 .draw(x, y, self.width, self.height, false)
         };
-        let (offset_x, offset_y) = self.effect_offset(talking, elapsed);
 
         if self.keep_idle_visible {
             if let Some(idle) = self.idle_asset.as_ref() {
