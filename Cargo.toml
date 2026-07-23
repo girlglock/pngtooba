@@ -1,6 +1,6 @@
 [package]
 name = "pngtooba"
-version = "1.0.0"
+version = "1.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -15,6 +15,7 @@ profiling = []
 [dependencies]
 obs-wrapper = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "gif", "webp"] }
+gif = "0.14"
 rustfft = "6"
 
 [profile.release]

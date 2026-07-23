@@ -12,11 +12,11 @@ pub enum Vowel {
 }
 
 const TABLE: [(Vowel, &str, &str, f32, f32); 5] = [
-    (Vowel::A, "vowel_a_image", "A", 700.0, 1220.0),
-    (Vowel::E, "vowel_e_image", "E", 530.0, 1840.0),
-    (Vowel::I, "vowel_i_image", "I", 400.0, 2000.0),
-    (Vowel::O, "vowel_o_image", "O", 570.0, 840.0),
-    (Vowel::U, "vowel_u_image", "U", 320.0, 800.0),
+    (Vowel::A, "vowel_a_image", "A", 750.0, 1300.0),
+    (Vowel::E, "vowel_e_image", "E", 450.0, 2100.0),
+    (Vowel::I, "vowel_i_image", "I", 270.0, 2500.0),
+    (Vowel::O, "vowel_o_image", "O", 520.0, 950.0),
+    (Vowel::U, "vowel_u_image", "U", 280.0, 650.0),
 ];
 
 impl Vowel {
@@ -104,7 +104,7 @@ impl VowelAnalyzer {
         let bin_hz = sample_rate as f32 / self.size as f32;
 
         let f1 = peak_frequency(&magnitudes, bin_hz, 150.0, 1000.0)?;
-        let f2 = peak_frequency(&magnitudes, bin_hz, (f1 + 150.0).max(850.0), 3200.0)?;
+        let f2 = peak_frequency(&magnitudes, bin_hz, f1 + 150.0, 3200.0)?;
 
         Some((f1, f2))
     }

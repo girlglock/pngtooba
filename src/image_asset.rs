@@ -7,6 +7,7 @@ pub struct ImageAsset {
     frames: Vec<GraphicsTexture>,
     cumulative_ms: Vec<u64>,
     total_ms: u64,
+    total_plays: Option<u32>,
 }
 
 impl ImageAsset {
@@ -14,7 +15,11 @@ impl ImageAsset {
         if self.frames.len() == 1 || self.total_ms == 0 {
             return &self.frames[0];
         }
-        let t = elapsed.as_millis() as u64 % self.total_ms;
+        let elapsed_ms = elapsed.as_millis() as u64;
+        let t = match self.total_plays {
+            Some(plays) if elapsed_ms >= self.total_ms * plays as u64 => self.total_ms - 1,
+            _ => elapsed_ms % self.total_ms,
+        };
         let index = self
             .cumulative_ms
             .iter()
@@ -31,8 +36,20 @@ fn make_texture(image: &image::RgbaImage) -> GraphicsTexture {
     texture
 }
 
+fn read_total_plays(path: &str) -> Option<u32> {
+    let file = File::open(path).ok()?;
+    let decoder = gif::Decoder::new(BufReader::new(file)).ok()?;
+    match decoder.repeat() {
+        gif::Repeat::Infinite => None,
+        gif::Repeat::Finite(0) => Some(1),
+        gif::Repeat::Finite(n) => Some(n as u32 + 1),
+    }
+}
+
 fn load_gif(path: &str) -> Option<ImageAsset> {
     use image::{codecs::gif::GifDecoder, AnimationDecoder};
+
+    let total_plays = read_total_plays(path);
 
     let file = File::open(path).ok()?;
     let decoder = GifDecoder::new(BufReader::new(file)).ok()?;
@@ -63,6 +80,7 @@ fn load_gif(path: &str) -> Option<ImageAsset> {
         frames,
         cumulative_ms,
         total_ms,
+        total_plays,
     })
 }
 
@@ -76,6 +94,7 @@ fn load_static(path: &str) -> Option<ImageAsset> {
         frames: vec![make_texture(&image)],
         cumulative_ms: vec![0],
         total_ms: 0,
+        total_plays: None,
     })
 }
 

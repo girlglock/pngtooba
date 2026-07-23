@@ -6,7 +6,7 @@ use crate::profiling::FrameProfiler;
 use crate::properties_ext::{add_group, set_visible, set_visible_raw};
 use crate::vowel::Vowel;
 use obs_wrapper::{
-    data::DataObj,
+    data::{DataArray, DataObj},
     obs_string,
     obs_sys::{
         obs_data_get_bool, obs_data_set_bool, obs_data_set_string, obs_data_t, obs_properties_get,
@@ -31,6 +31,19 @@ fn get_string(settings: &DataObj, key: &str) -> String {
     settings
         .get::<Cow<str>>(key)
         .map(|s| s.into_owned())
+        .unwrap_or_default()
+}
+
+fn read_path_list(settings: &DataObj, key: &str) -> Vec<String> {
+    settings
+        .get::<DataArray>(key)
+        .map(|arr| {
+            (0..arr.len())
+                .filter_map(|i| arr.get(i))
+                .filter_map(|item| item.get::<Cow<str>>("value").map(|s| s.into_owned()))
+                .filter(|path| !std::path::Path::new(path).is_dir())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -84,7 +97,6 @@ macro_rules! clear_callback {
 
 clear_callback!(clear_idle_image, "idle_image");
 clear_callback!(clear_speaking_image, "speaking_image");
-clear_callback!(clear_overlay_image, "overlay_image");
 clear_callback!(clear_vowel_a_image, "vowel_a_image");
 clear_callback!(clear_vowel_e_image, "vowel_e_image");
 clear_callback!(clear_vowel_i_image, "vowel_i_image");
@@ -128,8 +140,8 @@ pub struct PngTuberSource {
     vowel_paths: [String; 5],
     vowel_assets: [Option<ImageAsset>; 5],
 
-    overlay_path: String,
-    overlay_asset: Option<ImageAsset>,
+    overlay_paths: Vec<String>,
+    overlay_assets: Vec<Option<ImageAsset>>,
 
     when_speaking_effect: String,
     shake_intensity: f32,
@@ -175,8 +187,8 @@ impl PngTuberSource {
             speaking_asset: None,
             vowel_paths: Default::default(),
             vowel_assets: Default::default(),
-            overlay_path: String::new(),
-            overlay_asset: None,
+            overlay_paths: Vec::new(),
+            overlay_assets: Vec::new(),
             when_speaking_effect: EFFECT_NONE.to_string(),
             shake_intensity: 8.0,
             shake_speed: 10.0,
@@ -237,12 +249,19 @@ impl PngTuberSource {
             );
         }
 
-        reload_if_changed(
-            &mut self.overlay_path,
-            &mut self.overlay_asset,
-            settings,
-            "overlay_image",
-        );
+        let new_overlay_paths = read_path_list(settings, "overlay_images");
+        if new_overlay_paths != self.overlay_paths {
+            let mut new_assets = Vec::with_capacity(new_overlay_paths.len());
+            for (i, path) in new_overlay_paths.iter().enumerate() {
+                if self.overlay_paths.get(i) == Some(path) {
+                    new_assets.push(self.overlay_assets[i].take());
+                } else {
+                    new_assets.push(load_image_asset(path));
+                }
+            }
+            self.overlay_assets = new_assets;
+            self.overlay_paths = new_overlay_paths;
+        }
 
         self.when_speaking_effect = get_string(settings, "when_speaking_effect");
         if self.when_speaking_effect.is_empty() {
@@ -357,8 +376,6 @@ impl GetDefaultsSource for PngTuberSource {
             );
         }
 
-        settings.set_default::<Cow<str>>(obs_string!("overlay_image"), "");
-        settings.set_default::<bool>(obs_string!("overlay_image_clear"), false);
         settings.set_default::<Cow<str>>(obs_string!("when_speaking_effect"), EFFECT_NONE);
         settings.set_default::<f64>(obs_string!("shake_intensity"), 8.0);
         settings.set_default::<f64>(obs_string!("shake_speed"), 10.0);
@@ -545,75 +562,89 @@ impl GetPropertiesSource for PngTuberSource {
             obs_string!("effects"),
             obs_string!("Effects"),
             |g| {
-                add_image_field(
+                add_group(
                     g,
-                    "overlay_image",
-                    obs_string!("Overlay Image (shown on top of everything else)"),
-                    clear_overlay_image,
+                    obs_string!("overlay_images_group"),
+                    obs_string!("Overlay Images"),
+                    |sub| {
+                        sub.add(
+                            obs_string!("overlay_images"),
+                            obs_string!("Overlay Images (drawn on top, in list order)"),
+                            EditableListProp::new(EditableListType::Files)
+                                .with_filter(obs_string!("Image Files (*.png *.gif *.webp)")),
+                        );
+                    },
                 );
 
-                let mut effect_list = g.add_list::<ObsString>(
-                    obs_string!("when_speaking_effect"),
+                add_group(
+                    g,
+                    obs_string!("when_speaking_group"),
                     obs_string!("When Speaking"),
-                    false,
-                );
-                effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
-                effect_list.push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
-                effect_list.push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
-                effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
-                unsafe {
-                    obs_property_set_modified_callback(
-                        effect_list.as_ptr() as *mut _,
-                        Some(effect_modified),
-                    );
-                }
+                    |sub| {
+                        let mut effect_list = sub.add_list::<ObsString>(
+                            obs_string!("when_speaking_effect"),
+                            obs_string!("Effect"),
+                            false,
+                        );
+                        effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
+                        effect_list.push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
+                        effect_list.push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
+                        effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
+                        unsafe {
+                            obs_property_set_modified_callback(
+                                effect_list.as_ptr() as *mut _,
+                                Some(effect_modified),
+                            );
+                        }
 
-                g.add(
-                    obs_string!("shake_intensity"),
-                    obs_string!("Shake Intensity"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=100.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("shake_speed"),
-                    obs_string!("Shake Speed"),
-                    NumberProp::<f64>::new_float(0.5)
-                        .with_range(0.0..=30.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("bounce_height"),
-                    obs_string!("Bounce Height"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=300.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("bounce_speed"),
-                    obs_string!("Bounce Speed"),
-                    NumberProp::<f64>::new_float(0.1)
-                        .with_range(0.0..=10.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("hop_count"),
-                    obs_string!("Number of Hops"),
-                    NumberProp::<i64>::new_int().with_range(1..=20),
-                );
-                g.add(
-                    obs_string!("hop_speed"),
-                    obs_string!("Hop Speed"),
-                    NumberProp::<f64>::new_float(0.1)
-                        .with_range(0.1..=10.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("hop_height"),
-                    obs_string!("Hop Height"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=300.0)
-                        .with_slider(),
+                        sub.add(
+                            obs_string!("shake_intensity"),
+                            obs_string!("Shake Intensity"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=100.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("shake_speed"),
+                            obs_string!("Shake Speed"),
+                            NumberProp::<f64>::new_float(0.5)
+                                .with_range(0.0..=30.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("bounce_height"),
+                            obs_string!("Bounce Height"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=300.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("bounce_speed"),
+                            obs_string!("Bounce Speed"),
+                            NumberProp::<f64>::new_float(0.1)
+                                .with_range(0.0..=10.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("hop_count"),
+                            obs_string!("Number of Hops"),
+                            NumberProp::<i64>::new_int().with_range(1..=20),
+                        );
+                        sub.add(
+                            obs_string!("hop_speed"),
+                            obs_string!("Hop Speed"),
+                            NumberProp::<f64>::new_float(0.1)
+                                .with_range(0.1..=10.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("hop_height"),
+                            obs_string!("Hop Height"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=300.0)
+                                .with_slider(),
+                        );
+                    },
                 );
 
                 set_visible(
@@ -636,68 +667,77 @@ impl GetPropertiesSource for PngTuberSource {
                 set_visible(g, "hop_speed", self.when_speaking_effect == EFFECT_HOP);
                 set_visible(g, "hop_height", self.when_speaking_effect == EFFECT_HOP);
 
-                let mut idle_effect_list = g.add_list::<ObsString>(
-                    obs_string!("when_idle_effect"),
+                add_group(
+                    g,
+                    obs_string!("when_idle_group"),
                     obs_string!("When Idle"),
-                    false,
-                );
-                idle_effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
-                idle_effect_list.push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
-                idle_effect_list.push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
-                idle_effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
-                unsafe {
-                    obs_property_set_modified_callback(
-                        idle_effect_list.as_ptr() as *mut _,
-                        Some(idle_effect_modified),
-                    );
-                }
+                    |sub| {
+                        let mut idle_effect_list = sub.add_list::<ObsString>(
+                            obs_string!("when_idle_effect"),
+                            obs_string!("Effect"),
+                            false,
+                        );
+                        idle_effect_list.push(obs_string!("None"), ObsString::from(EFFECT_NONE));
+                        idle_effect_list
+                            .push(obs_string!("Shake"), ObsString::from(EFFECT_SHAKE));
+                        idle_effect_list
+                            .push(obs_string!("Bounce"), ObsString::from(EFFECT_BOUNCE));
+                        idle_effect_list.push(obs_string!("Hop"), ObsString::from(EFFECT_HOP));
+                        unsafe {
+                            obs_property_set_modified_callback(
+                                idle_effect_list.as_ptr() as *mut _,
+                                Some(idle_effect_modified),
+                            );
+                        }
 
-                g.add(
-                    obs_string!("idle_shake_intensity"),
-                    obs_string!("Idle Shake Intensity"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=100.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("idle_shake_speed"),
-                    obs_string!("Idle Shake Speed"),
-                    NumberProp::<f64>::new_float(0.5)
-                        .with_range(0.0..=30.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("idle_bounce_height"),
-                    obs_string!("Idle Bounce Height"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=300.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("idle_bounce_speed"),
-                    obs_string!("Idle Bounce Speed"),
-                    NumberProp::<f64>::new_float(0.1)
-                        .with_range(0.0..=10.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("idle_hop_count"),
-                    obs_string!("Idle Number of Hops"),
-                    NumberProp::<i64>::new_int().with_range(1..=20),
-                );
-                g.add(
-                    obs_string!("idle_hop_speed"),
-                    obs_string!("Idle Hop Speed"),
-                    NumberProp::<f64>::new_float(0.1)
-                        .with_range(0.1..=10.0)
-                        .with_slider(),
-                );
-                g.add(
-                    obs_string!("idle_hop_height"),
-                    obs_string!("Idle Hop Height"),
-                    NumberProp::<f64>::new_float(1.0)
-                        .with_range(0.0..=300.0)
-                        .with_slider(),
+                        sub.add(
+                            obs_string!("idle_shake_intensity"),
+                            obs_string!("Shake Intensity"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=100.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("idle_shake_speed"),
+                            obs_string!("Shake Speed"),
+                            NumberProp::<f64>::new_float(0.5)
+                                .with_range(0.0..=30.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("idle_bounce_height"),
+                            obs_string!("Bounce Height"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=300.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("idle_bounce_speed"),
+                            obs_string!("Bounce Speed"),
+                            NumberProp::<f64>::new_float(0.1)
+                                .with_range(0.0..=10.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("idle_hop_count"),
+                            obs_string!("Number of Hops"),
+                            NumberProp::<i64>::new_int().with_range(1..=20),
+                        );
+                        sub.add(
+                            obs_string!("idle_hop_speed"),
+                            obs_string!("Hop Speed"),
+                            NumberProp::<f64>::new_float(0.1)
+                                .with_range(0.1..=10.0)
+                                .with_slider(),
+                        );
+                        sub.add(
+                            obs_string!("idle_hop_height"),
+                            obs_string!("Hop Height"),
+                            NumberProp::<f64>::new_float(1.0)
+                                .with_range(0.0..=300.0)
+                                .with_slider(),
+                        );
+                    },
                 );
 
                 set_visible(
@@ -887,6 +927,7 @@ impl VideoRenderSource for PngTuberSource {
         } else {
             let asset = if talking {
                 self.talking_asset(vowel, vowel_enabled)
+                    .or(self.idle_asset.as_ref())
             } else {
                 self.idle_asset.as_ref()
             };
@@ -895,7 +936,7 @@ impl VideoRenderSource for PngTuberSource {
             }
         }
 
-        if let Some(overlay) = self.overlay_asset.as_ref() {
+        for overlay in self.overlay_assets.iter().flatten() {
             draw_at(overlay, offset_x, offset_y);
         }
 
